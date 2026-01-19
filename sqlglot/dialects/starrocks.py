@@ -372,17 +372,15 @@ class StarRocks(MySQL):
                 → "PARTITION BY FROM_UNIXTIME(ts), region" (for tables without outer parentheses)
                 → "PARTITION BY (FROM_UNIXTIME(ts), region)" (for MVs: with outer parentheses)
             """
-            node = expression.this
-            partition_columns_str = self.expressions(node, flat=True)
-            any_func_expr = any(isinstance(e, (exp.Func, exp.Anonymous)) for e in node.expressions) \
-                if isinstance(node, exp.Tuple) else False
+            partition_columns_str = self.expressions(expression, "this", flat=True)
+            any_func_expr = any(isinstance(e, (exp.Func, exp.Anonymous)) for e in expression.this.expressions) \
+                if isinstance(expression.this, exp.Tuple) else False
             create = expression.find_ancestor(exp.Create)
-            # SR needs `(...)` for MVs, with parens, and columns only
+            # SR needs `(...)` for MVs, with parens, and columns only, for expression partitioning
             if create and create.kind == "VIEW" or not any_func_expr:
-                return f"PARTITION BY ({partition_columns_str})"
-            else:
-                # SR doesn't support `(func(...), col2)` with parens for normal tables
-                return f"PARTITION BY {partition_columns_str}"
+                partition_columns_str = f"({partition_columns_str})"
+
+            return f"PARTITION BY {partition_columns_str}"
 
         def cluster_sql(self, expression: exp.Cluster) -> str:
             """Generate StarRocks ORDER BY clause for clustering.
@@ -414,7 +412,7 @@ class StarRocks(MySQL):
             # method is required by RefreshTriggerProperty, but StarRocks refresh_moment is optional.
             # Only render it when it matches StarRocks keywords.
             method_sql = self.sql(expression, "method")
-            if method_sql and method_sql.upper() != "UNSPECIFIED":
+            if method_sql.upper() != "UNSPECIFIED":
                 parts.append(method_sql)
 
             if kind := expression.args.get("kind"):
