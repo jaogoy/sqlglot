@@ -32,6 +32,9 @@ class TestStarrocks(Validator):
         self.validate_identity("CREATE TABLE t (c INT) COMMENT 'c'")
 
         ddl_sqls = [
+            "PARTITION BY (col1, col2)",
+            "PARTITION BY (DATE_TRUNC('DAY', col2), col1)",
+            "PARTITION BY (FROM_UNIXTIME(col2))",
             "DISTRIBUTED BY HASH (col1) BUCKETS 1",
             "DISTRIBUTED BY HASH (col1)",
             "DISTRIBUTED BY RANDOM BUCKETS 1",
@@ -42,6 +45,7 @@ class TestStarrocks(Validator):
             "DUPLICATE KEY (col1, col2) DISTRIBUTED BY HASH (col1)",
             "UNIQUE KEY (col1, col2) PARTITION BY RANGE (col1) (START ('2024-01-01') END ('2024-01-31') EVERY (INTERVAL 1 DAY)) DISTRIBUTED BY HASH (col1)",
             "UNIQUE KEY (col1, col2) PARTITION BY RANGE (col1, col2) (START ('1') END ('10') EVERY (1), START ('10') END ('100') EVERY (10)) DISTRIBUTED BY HASH (col1)",
+            "ORDER BY (col1, col2)",
             "DISTRIBUTED BY HASH (col1) ROLLUP (r1(event_day, siteid), r2(event_day, citycode), r3(event_day))",
             "DISTRIBUTED BY HASH (col1) ROLLUP (r1(col2))",
             "DISTRIBUTED BY HASH (col1) ROLLUP (`r1`(`col2`))",
@@ -68,6 +72,107 @@ class TestStarrocks(Validator):
         self.validate_identity(
             "CREATE VIEW foo (foo_col1) SECURITY NONE AS SELECT bar_col1 FROM bar"
         )
+
+        # RANGE partitioning
+        range_dynamic = exp.PartitionByRangePropertyDynamic(
+            start=exp.Literal.string("2024-01-01"),
+            end=exp.Literal.string("2024-01-31"),
+            every=exp.Interval(this=exp.Literal.number(1), unit=exp.var("DAY")),
+        )
+        range_partition = exp.PartitionByRangeProperty(
+            partition_expressions=[exp.column("c1")],
+            create_expressions=[
+                range_dynamic,
+                exp.Var(
+                    this="START ('2024-02-01') END ('2024-02-28') EVERY (INTERVAL 1 DAY)"
+                ),
+            ],
+        )
+        self.assertEqual(
+            range_partition.sql(dialect="starrocks"),
+            "PARTITION BY RANGE (c1) (START ('2024-01-01') END ('2024-01-31') EVERY (INTERVAL 1 DAY), START ('2024-02-01') END ('2024-02-28') EVERY (INTERVAL 1 DAY))",
+        )
+
+        # LIST partitioning
+        list_partition = exp.PartitionByListProperty(
+            partition_expressions=[exp.column("c1")],
+            create_expressions=[
+                exp.Var(this="PARTITION p1 VALUES IN (1, 2)"),
+                exp.Var(this="PARTITION p2 VALUES IN ('US', 'CN')"),
+            ],
+        )
+        self.assertEqual(
+            list_partition.sql(dialect="starrocks"),
+            "PARTITION BY LIST (c1) (PARTITION p1 VALUES IN (1, 2), PARTITION p2 VALUES IN ('US', 'CN'))",
+        )
+
+        # expression partitioning
+        expr_partition = exp.PartitionedByProperty(
+            this=exp.Tuple(
+                expressions=[
+                    exp.Anonymous(this="FROM_UNIXTIME", expressions=[exp.column("ts")]),
+                    exp.column("region"),
+                ]
+            )
+        )
+        self.assertEqual(
+            expr_partition.sql(dialect="starrocks"),
+            "PARTITION BY FROM_UNIXTIME(ts), region",
+        )
+        # expression partitioning in MV
+        create = exp.Create(
+            this=exp.to_table("t"),
+            kind="VIEW",
+            properties=exp.Properties(expressions=[expr_partition]),
+        )
+        create_sql = create.sql(dialect="starrocks")
+        self.assertTrue("PARTITION BY (FROM_UNIXTIME(ts), region)" in create_sql)
+
+        # tuple partitioning (only columns)
+        columns_only_partition = exp.PartitionedByProperty(
+            this=exp.Tuple(expressions=[exp.column("c1"), exp.column("c2")])
+        )
+        self.assertEqual(
+            columns_only_partition.sql(dialect="starrocks"),
+            "PARTITION BY (c1, c2)",
+        )
+
+        # ORDER BY
+        multi_column_cluster = exp.Cluster(
+            expressions=[
+                exp.column("c"),
+                exp.column("d"),
+            ]
+        )
+        self.assertEqual(multi_column_cluster.sql(dialect="starrocks"), "ORDER BY (c, d)")
+
+        single_column_cluster = exp.Cluster(expressions=[exp.column("c")])
+        self.assertEqual(single_column_cluster.sql(dialect="starrocks"), "ORDER BY (c)")
+
+        # MV: Refresh trigger property
+        manual_refresh = exp.RefreshTriggerProperty(kind=exp.var("MANUAL"))
+        self.assertEqual(manual_refresh.sql(dialect="starrocks"), "REFRESH MANUAL")
+
+        async_refresh = exp.RefreshTriggerProperty(
+            method=exp.var("IMMEDIATE"),
+            kind=exp.var("ASYNC"),
+            starts=exp.Literal.string("2025-01-01 00:00:00"),
+            every=exp.Literal.number(5),
+            unit=exp.var("MINUTE"),
+        )
+        self.assertEqual(
+            async_refresh.sql(dialect="starrocks"),
+            "REFRESH IMMEDIATE ASYNC START ('2025-01-01 00:00:00') EVERY (INTERVAL 5 MINUTE)",
+        )
+
+        skip_unspecified_method_refresh = exp.RefreshTriggerProperty(
+            method=exp.var("UNSPECIFIED"), kind=exp.var("ASYNC")
+        )
+        self.assertEqual(skip_unspecified_method_refresh.sql(dialect="starrocks"), "REFRESH ASYNC")
+
+        # RENAME table
+        rename = exp.AlterRename(this=exp.to_table("t2"))
+        self.assertEqual(rename.sql(dialect="starrocks"), "RENAME t2")
 
         # Test ROLLUP property
         self.validate_all(

@@ -176,6 +176,8 @@ class StarRocks(MySQL):
 
         # StarRocks doesn't support "IS TRUE/FALSE" syntax.
         IS_BOOL_ALLOWED = False
+        # StarRocks doesn't support renaming a table with a database.
+        RENAME_TABLE_WITH_DB = False
 
         CAST_MAPPING = {}
 
@@ -192,6 +194,9 @@ class StarRocks(MySQL):
             exp.PrimaryKey: exp.Properties.Location.POST_SCHEMA,
             exp.UniqueKeyProperty: exp.Properties.Location.POST_SCHEMA,
             exp.PartitionByRangeProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.PartitionByListProperty: exp.Properties.Location.POST_SCHEMA,
+            exp.PartitionedByProperty: exp.Properties.Location.POST_SCHEMA,  # expression partitioning
+            exp.RefreshTriggerProperty: exp.Properties.Location.POST_SCHEMA,
             exp.RollupProperty: exp.Properties.Location.POST_SCHEMA,
         }
 
@@ -397,3 +402,48 @@ class StarRocks(MySQL):
                     props.set("expressions", primary_key.pop(), engine_index + 1, overwrite=False)
 
             return super().create_sql(expression)
+
+        def alterrename_sql(self, expression: exp.AlterRename, include_to: bool = True) -> str:
+            """Override alterrename_sql to avoid TO keyword in ALTER RENAME statements."""
+            return super().alterrename_sql(expression, include_to=False)
+
+        def partitionedbyproperty_sql(self, expression: exp.PartitionedByProperty) -> str:
+            """Generate StarRocks PARTITION BY clause for expression partitioning."""
+            partition_columns_str = self.expressions(expression, "this", flat=True)
+            any_func_expr = (
+                isinstance(expression.this, exp.Tuple) and any(isinstance(e, (exp.Func, exp.Anonymous))
+                for e in expression.this.expressions)
+            )
+            create = expression.find_ancestor(exp.Create)
+            # For MVs and column-only tuples, StarRocks needs outer parentheses.
+            if (create and create.kind == "VIEW") or not any_func_expr:
+                partition_columns_str = f"({partition_columns_str})"
+
+            return f"PARTITION BY {partition_columns_str}"
+
+        def cluster_sql(self, expression: exp.Cluster) -> str:
+            """Generate StarRocks ORDER BY clause for clustering."""
+            expressions = self.expressions(expression, flat=True)
+            return f"ORDER BY ({expressions})" if expressions else ""
+
+        def refreshtriggerproperty_sql(self, expression: exp.RefreshTriggerProperty) -> str:
+            """Generate StarRocks REFRESH clause for materialized views."""
+            parts = ["REFRESH"]
+
+            # Only render method when it matches StarRocks keywords.
+            method_sql = self.sql(expression, "method")
+            if method_sql.upper() != "UNSPECIFIED":
+                parts.append(method_sql)
+
+            if kind := expression.args.get("kind"):
+                parts.append(self.sql(kind))
+
+            if starts := self.sql(expression, "starts"):
+                parts.append(f"START ({starts})")
+
+            every = self.sql(expression, "every")
+            unit = self.sql(expression, "unit")
+            if every and unit:
+                parts.append(f"EVERY (INTERVAL {every} {unit})")
+
+            return " ".join(p for p in parts if p and str(p).strip())

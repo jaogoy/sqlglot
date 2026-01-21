@@ -5287,6 +5287,11 @@ class Generator(metaclass=_Generator):
         create = self.expressions(expression, "create_expressions")
         return f"PARTITION BY RANGE {self.wrap(partitions)} {self.wrap(create)}"
 
+    def partitionbylistproperty_sql(self, expression: exp.PartitionByListProperty) -> str:
+        partitions = self.expressions(expression, "partition_expressions")
+        create = self.expressions(expression, "create_expressions")
+        return f"PARTITION BY LIST {self.wrap(partitions)} {self.wrap(create)}"
+
     def partitionbyrangepropertydynamic_sql(
         self, expression: exp.PartitionByRangePropertyDynamic
     ) -> str:
